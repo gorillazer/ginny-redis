@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -13,12 +12,13 @@ import (
 
 // Manager redis管理器：client连接池(cluster、sentinel、standalone部署模式，可配置读写分离)，lua脚本管理
 type Manager struct {
+	logger *zap.Logger
 	client redis.UniversalClient
 	script map[interface{}]*redis.Script
 }
 
 // NewManager 根据基础配置 初始化redis管理器
-func NewManager(config *Config) (*Manager, error) {
+func NewManager(config *Config, logger *zap.Logger) (*Manager, error) {
 	var client redis.UniversalClient
 	if len(config.ClusterAddrs) > 0 {
 		client = newCluster(config)
@@ -31,6 +31,7 @@ func NewManager(config *Config) (*Manager, error) {
 	}
 
 	return &Manager{
+		logger: logger.With(zap.String("type", "RedisManager")),
 		client: client,
 		script: make(map[interface{}]*redis.Script),
 	}, client.Ping(context.Background()).Err()
@@ -78,7 +79,7 @@ func (m *Manager) Script(key interface{}) *redis.Script {
 // Close 释放连接池使用的资源。该函数应当很少用到
 func (m *Manager) Close() {
 	if err := m.client.Close(); err != nil {
-		log.Fatal("close redisdb client error", zap.Error(err))
+		m.logger.Sugar().Fatalf("close redisdb client error", zap.Error(err))
 	}
 }
 
