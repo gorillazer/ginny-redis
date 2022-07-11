@@ -3,6 +3,9 @@ package redis
 import (
 	"fmt"
 	"strings"
+
+	"github.com/pkg/errors"
+	"github.com/spf13/viper"
 )
 
 // Config redis基础配置
@@ -127,4 +130,14 @@ func (s *Standalone) String() string {
 		fmt.Fprintln(&str, "slaves:", s.StandaloneAddrs[i].Slaves)
 	}
 	return str.String()
+}
+
+// NewConfig
+func NewConfig(v *viper.Viper) (*Config, error) {
+	var err error
+	o := new(Config)
+	if err = v.UnmarshalKey("redis", o); err != nil {
+		return nil, errors.Wrap(err, "unmarshal app option error")
+	}
+	return o, err
 }

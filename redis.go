@@ -7,18 +7,19 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/goriller/ginny-util/graceful"
 	"go.uber.org/zap"
 )
 
-// Manager redis管理器：client连接池(cluster、sentinel、standalone部署模式，可配置读写分离)，lua脚本管理
-type Manager struct {
+// Redis redis管理器：client连接池(cluster、sentinel、standalone部署模式，可配置读写分离)，lua脚本管理
+type Redis struct {
 	logger *zap.Logger
 	client redis.UniversalClient
 	script map[interface{}]*redis.Script
 }
 
-// NewManager 根据基础配置 初始化redis管理器
-func NewManager(config *Config, logger *zap.Logger) (*Manager, error) {
+// NewRedis 根据基础配置 初始化redis管理器
+func NewRedis(ctx context.Context, config *Config, logger *zap.Logger) (*Redis, error) {
 	var client redis.UniversalClient
 	if len(config.ClusterAddrs) > 0 {
 		client = newCluster(config)
@@ -29,16 +30,20 @@ func NewManager(config *Config, logger *zap.Logger) (*Manager, error) {
 	} else {
 		return nil, errors.New("invalid deploy mode confiy")
 	}
+	// graceful
+	graceful.AddCloser(func(ctx context.Context) error {
+		return client.Close()
+	})
 
-	return &Manager{
-		logger: logger.With(zap.String("type", "RedisManager")),
+	return &Redis{
+		logger: logger.With(zap.String("type", "RedisRedis")),
 		client: client,
 		script: make(map[interface{}]*redis.Script),
-	}, client.Ping(context.Background()).Err()
+	}, client.Ping(ctx).Err()
 }
 
 // DB 返回连接池客户端
-func (m *Manager) DB() redis.UniversalClient {
+func (m *Redis) DB() redis.UniversalClient {
 	return m.client
 }
 
@@ -47,7 +52,7 @@ func (m *Manager) DB() redis.UniversalClient {
 //   主要为方便script与pipeline等结合使用时可直接调用EvalSha（单独使用script时driver已做处理）
 // kvs必须偶数个: key1 value1 key2 value2 ...。key为各自服务包内定义，可参考type scriptKeyXXX struct{} 空结构体。
 //   value是相应脚本*redisdb.Script=redisdb.NewScript()
-func (m *Manager) RegisterScript(kvs ...interface{}) error {
+func (m *Redis) RegisterScript(ctx context.Context, kvs ...interface{}) error {
 	if len(kvs)%2 != 0 {
 		return fmt.Errorf("len(kvs)(%d) not even", len(kvs))
 	}
@@ -62,7 +67,7 @@ func (m *Manager) RegisterScript(kvs ...interface{}) error {
 		if _, ok := m.script[kvs[i]]; ok {
 			return fmt.Errorf("duplicate registered key(%T)", kvs[i])
 		}
-		if err := loadScript(m.client, v); err != nil {
+		if err := loadScript(ctx, m.client, v); err != nil {
 			return err
 		}
 		m.script[kvs[i]] = v
@@ -72,12 +77,12 @@ func (m *Manager) RegisterScript(kvs ...interface{}) error {
 
 // Script 根据脚本key取脚本结构
 // 调用方保证：需在服务初始化时 调用RegisterScript()注册相应的键值对，对未注册的key 本函数将返回nil
-func (m *Manager) Script(key interface{}) *redis.Script {
+func (m *Redis) Script(key interface{}) *redis.Script {
 	return m.script[key]
 }
 
 // Close 释放连接池使用的资源。该函数应当很少用到
-func (m *Manager) Close() {
+func (m *Redis) Close() {
 	if err := m.client.Close(); err != nil {
 		m.logger.Sugar().Fatalf("close redisdb client error", zap.Error(err))
 	}
@@ -214,13 +219,13 @@ func options(config *Config) *redis.Options {
 	}
 }
 
-func loadScript(client redis.UniversalClient, script *redis.Script) error {
-	exists, err := script.Exists(context.Background(), client).Result()
+func loadScript(ctx context.Context, client redis.UniversalClient, script *redis.Script) error {
+	exists, err := script.Exists(ctx, client).Result()
 	if err != nil {
 		return err
 	}
 	if len(exists) <= 0 || !exists[0] {
-		return script.Load(context.Background(), client).Err()
+		return script.Load(ctx, client).Err()
 	}
 	return nil
 }
