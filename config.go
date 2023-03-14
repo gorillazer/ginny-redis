@@ -1,7 +1,10 @@
 package redis
 
 import (
-	"fmt"
+	"context"
+	"encoding/json"
+	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -51,30 +54,8 @@ type Config struct {
 
 // String 打印可输出的配置
 func (c *Config) String() string {
-	var str strings.Builder
-	fmt.Fprintln(&str, "redisdb confiy:")
-	fmt.Fprintln(&str, "username:", c.Username)
-	fmt.Fprintln(&str, "db:", c.DB)
-
-	fmt.Fprintln(&str, "pool_size:", c.PoolSize)
-	fmt.Fprintln(&str, "min_idle_conns:", c.MinIdleConns)
-	fmt.Fprintln(&str, "idle_timeout:", c.IdleTimeout)
-	fmt.Fprintln(&str, "idle_check_frequency:", c.IdleCheckFrequency)
-	fmt.Fprintln(&str, "max_conn_age:", c.MaxConnAge)
-	fmt.Fprintln(&str, "pool_timeout:", c.PoolTimeout)
-
-	fmt.Fprintln(&str, "dial_timeout:", c.DialTimeout)
-	fmt.Fprintln(&str, "read_timeout:", c.ReadTimeout)
-	fmt.Fprintln(&str, "write_timeout:", c.WriteTimeout)
-
-	fmt.Fprintln(&str, "route_by_latency:", c.RouteByLatency)
-	fmt.Fprintln(&str, "route_randomly:", c.RouteRandomly)
-
-	fmt.Fprintln(&str, c.Sentinel.String())
-	fmt.Fprintln(&str, c.Cluster.String())
-	fmt.Fprintln(&str, c.Standalone.String())
-
-	return str.String()
+	bt, _ := json.Marshal(c)
+	return string(bt)
 }
 
 // Sentinel 哨兵部署特性配置
@@ -86,50 +67,25 @@ type Sentinel struct {
 	SentinelPassword string   `json:"sentinel_password" mapstructure:"sentinel_password"`
 }
 
-// String 打印可输出的配置
-func (s *Sentinel) String() string {
-	var str strings.Builder
-	fmt.Fprintln(&str, "sentinel confiy:")
-	fmt.Fprintln(&str, "master_name:", s.MasterName)
-	fmt.Fprintln(&str, "sentinel_addrs:", s.SentinelAddrs)
-	return str.String()
-}
-
 // Cluster redisdb cluster部署特性配置
 type Cluster struct {
 	//集群节点地址
 	ClusterAddrs []string `json:"cluster_addrs" mapstructure:"cluster_addrs"`
 	//最大的重定向重试次数，网络错误或找错数据分片时 client会得到重定向错误和集群的最新情况 进行重定向。-1表示不限制，driver默认3次
-	MaxRedirects int `json:"max_redirects" mapstructure:"max_redirects"`
+	MaxRedirects     int               `json:"max_redirects" mapstructure:"max_redirects"`
+	ClusterSlotAddrs []ClusterSlotAddr `json:"cluster_slot_addrs" mapstructure:"cluster_slot_addrs"`
 }
 
-// String 打印可输出的配置
-func (c *Cluster) String() string {
-	var str strings.Builder
-	fmt.Fprintln(&str, "cluster confiy:")
-	fmt.Fprintln(&str, "cluster_addrs:", c.ClusterAddrs)
-	fmt.Fprintln(&str, "max_redirects:", c.MaxRedirects)
-	return str.String()
+type ClusterSlotAddr struct {
+	Master string   `json:"master" mapstructure:"master"`
+	Slaves []string `json:"slaves" mapstructure:"slaves"`
 }
 
 // Standalone 单机、一主多从、或非redis哨兵/集群模式的分片集群部署(多主多从 此种情况应当少见) 特性配置
 type Standalone struct {
 	//需要读写分离时 需配出部署中的所有主从节点地址，1套主从为1个ClusterSlot，仅单机模式 只有1主没有从时 不写slaves配置
-	StandaloneAddrs []struct {
-		Master string   `json:"master" mapstructure:"master"`
-		Slaves []string `json:"slaves" mapstructure:"slaves"`
-	} `json:"standalone_addrs" mapstructure:"standalone_addrs"`
-}
-
-// String 打印可输出的配置
-func (s *Standalone) String() string {
-	var str strings.Builder
-	fmt.Fprintln(&str, "standalone confiy:")
-	for i := 0; i < len(s.StandaloneAddrs); i++ {
-		fmt.Fprintln(&str, "master:", s.StandaloneAddrs[i].Master)
-		fmt.Fprintln(&str, "slaves:", s.StandaloneAddrs[i].Slaves)
-	}
-	return str.String()
+	Master string   `json:"master" mapstructure:"master"`
+	Slaves []string `json:"slaves" mapstructure:"slaves"`
 }
 
 // NewConfig
@@ -138,6 +94,65 @@ func NewConfig(v *viper.Viper) (*Config, error) {
 	o := new(Config)
 	if err = v.UnmarshalKey("redis", o); err != nil {
 		return nil, errors.Wrap(err, "unmarshal app option error")
+	}
+	return o, err
+}
+
+// NewConfigByDSN
+// redis://127.0.0.1:6379?db=0&username=&password=&slaves=&sentinel_addrs=&master_name=
+// &sentinel_password&cluster_addrs=&max_redirects
+func NewConfigByDSN(ctx context.Context, dsn string) (*Config, error) {
+	o := new(Config)
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	q := u.Query()
+
+	db := q.Get("db")
+	if db == "" {
+		db = "0"
+	}
+	dbNum, err := strconv.Atoi(db)
+	if err != nil {
+		return nil, err
+	}
+	o.DB = dbNum
+	o.Username = q.Get("username")
+	o.Password = q.Get("password")
+	sentinel_addrs := q.Get("sentinel_addrs")
+	cluster_addrs := q.Get("cluster_addrs")
+	if sentinel_addrs != "" {
+		o.Sentinel = Sentinel{
+			MasterName:       q.Get("master_name"),
+			SentinelAddrs:    strings.Split(sentinel_addrs, ","),
+			SentinelPassword: o.Password,
+		}
+	} else if cluster_addrs != "" {
+		max_redirects := q.Get("max_redirects")
+		if max_redirects == "" {
+			max_redirects = "1"
+		}
+		maxRedirects, err := strconv.Atoi(max_redirects)
+		if err != nil {
+			return nil, err
+		}
+		o.Cluster = Cluster{
+			ClusterAddrs: strings.Split(cluster_addrs, ","),
+			MaxRedirects: maxRedirects,
+		}
+	} else {
+		slaves := q.Get("slaves")
+		slaveAddrs := []string{}
+		o.Standalone = Standalone{
+			Master: u.Host,
+		}
+		if slaves != "" {
+			slaveAddrs = append(slaveAddrs, strings.Split(slaves, ",")...)
+		}
+		o.Standalone.Slaves = slaveAddrs
 	}
 	return o, err
 }
